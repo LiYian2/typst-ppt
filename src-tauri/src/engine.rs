@@ -1,5 +1,7 @@
 use crate::model::{BuildSnapshot, BuildStatus, SpeakerNote};
 use serde_json::Value;
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,7 +16,7 @@ pub struct BuildOutcome {
 }
 
 pub fn typst_version() -> Result<String, String> {
-    let output = Command::new("typst")
+    let output = typst_command()
         .arg("--version")
         .output()
         .map_err(|error| typst_missing_message(&error))?;
@@ -46,7 +48,7 @@ pub fn build_deck(source_path: &Path, root: &Path) -> BuildOutcome {
     }
 
     let output_path = output_dir.join(format!("deck-{revision}.pdf"));
-    let compile = Command::new("typst")
+    let compile = typst_command()
         .arg("compile")
         .arg("--diagnostic-format")
         .arg("short")
@@ -127,7 +129,91 @@ fn failure(
 }
 
 fn typst_missing_message(error: &std::io::Error) -> String {
-    format!("Typst CLI is unavailable ({error}). Install Typst and ensure `typst` is on PATH.")
+    format!("Typst CLI is unavailable ({error}). Install Typst, ensure `typst` is on PATH, or set TYPST_PATH to the executable.")
+}
+
+fn typst_command() -> Command {
+    Command::new(resolve_typst_executable())
+}
+
+fn resolve_typst_executable() -> OsString {
+    let configured = env::var_os("TYPST_PATH");
+    let search_path = env::var_os("PATH");
+    let home = env::var_os("HOME").map(PathBuf::from);
+    resolve_typst_executable_from(
+        configured.as_deref(),
+        search_path.as_deref(),
+        home.as_deref(),
+    )
+}
+
+fn resolve_typst_executable_from(
+    configured: Option<&OsStr>,
+    search_path: Option<&OsStr>,
+    home: Option<&Path>,
+) -> OsString {
+    if let Some(path) = configured
+        .map(Path::new)
+        .filter(|path| is_executable_file(path))
+    {
+        return path.as_os_str().to_owned();
+    }
+
+    if let Some(path) = search_path.and_then(|value| {
+        env::split_paths(value)
+            .map(|directory| directory.join(platform_typst_name()))
+            .find(|path| is_executable_file(path))
+    }) {
+        return path.into_os_string();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = vec![
+            PathBuf::from("/opt/homebrew/bin/typst"),
+            PathBuf::from("/usr/local/bin/typst"),
+        ];
+        if let Some(home) = home {
+            candidates.push(home.join(".cargo/bin/typst"));
+            candidates.push(home.join(".local/bin/typst"));
+        }
+        if let Some(path) = candidates.into_iter().find(|path| is_executable_file(path)) {
+            return path.into_os_string();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = home;
+
+    OsString::from("typst")
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn platform_typst_name() -> &'static str {
+    if cfg!(windows) {
+        "typst.exe"
+    } else {
+        "typst"
+    }
 }
 
 fn clean_diagnostics(stderr: &[u8]) -> Vec<String> {
@@ -162,7 +248,7 @@ fn prune_old_builds(output_dir: &Path, keep: usize) {
 }
 
 fn query_speaker_notes(source_path: &Path, root: &Path) -> Result<Vec<SpeakerNote>, String> {
-    let eval_output = Command::new("typst")
+    let eval_output = typst_command()
         .arg("eval")
         .arg("--root")
         .arg(root)
@@ -177,7 +263,7 @@ fn query_speaker_notes(source_path: &Path, root: &Path) -> Result<Vec<SpeakerNot
     } else {
         // Typst before 0.15 does not have document-aware `eval`; retain its
         // equivalent query command as a compatibility fallback.
-        Command::new("typst")
+        typst_command()
             .arg("query")
             .arg("--root")
             .arg(root)
@@ -237,6 +323,17 @@ pub fn parse_pdfpc_notes(value: &Value) -> Vec<SpeakerNote> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::ffi::OsString;
+
+    fn create_test_executable(path: &Path) {
+        fs::write(path, []).expect("create test executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                .expect("make test file executable");
+        }
+    }
 
     #[test]
     fn parses_touying_pdfpc_notes_by_physical_page() {
@@ -261,5 +358,43 @@ mod tests {
     #[test]
     fn missing_pdfpc_pages_is_an_empty_notes_collection() {
         assert!(parse_pdfpc_notes(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn configured_typst_path_takes_precedence_over_path() {
+        let test_root =
+            std::env::temp_dir().join(format!("typst-presenter-resolver-{}", std::process::id()));
+        let configured = test_root.join("configured-typst");
+        let path_directory = test_root.join("bin");
+        let path_typst = path_directory.join(platform_typst_name());
+        fs::create_dir_all(&path_directory).expect("create resolver test directory");
+        create_test_executable(&configured);
+        create_test_executable(&path_typst);
+
+        let resolved = resolve_typst_executable_from(
+            Some(configured.as_os_str()),
+            Some(path_directory.as_os_str()),
+            None,
+        );
+
+        assert_eq!(resolved, configured.into_os_string());
+        fs::remove_dir_all(test_root).expect("remove resolver test directory");
+    }
+
+    #[test]
+    fn typst_is_resolved_from_path() {
+        let test_root = std::env::temp_dir().join(format!(
+            "typst-presenter-path-resolver-{}",
+            std::process::id()
+        ));
+        let path_directory = test_root.join("bin");
+        let path_typst = path_directory.join(platform_typst_name());
+        fs::create_dir_all(&path_directory).expect("create resolver test directory");
+        create_test_executable(&path_typst);
+
+        let resolved = resolve_typst_executable_from(None, Some(path_directory.as_os_str()), None);
+
+        assert_eq!(resolved, OsString::from(path_typst));
+        fs::remove_dir_all(test_root).expect("remove resolver test directory");
     }
 }
