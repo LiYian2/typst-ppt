@@ -13,6 +13,7 @@ export function PdfPage({ document, page, label, dimmed = false }: PdfPageProps)
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [rendering, setRendering] = useState(false);
+  const [renderError, setRenderError] = useState<string | null>(null);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -32,6 +33,7 @@ export function PdfPage({ document, page, label, dimmed = false }: PdfPageProps)
     let cancelled = false;
     let task: RenderTask | null = null;
     setRendering(true);
+    setRenderError(null);
 
     void document.getPage(page + 1).then((pdfPage) => {
       if (cancelled) return;
@@ -46,14 +48,18 @@ export function PdfPage({ document, page, label, dimmed = false }: PdfPageProps)
       canvas.height = Math.max(1, Math.floor(viewport.height));
       canvas.style.width = `${viewport.width / pixelRatio}px`;
       canvas.style.height = `${viewport.height / pixelRatio}px`;
-      task = pdfPage.render({ canvas, canvasContext: context, viewport });
+      // The context-only API is the compatibility path documented by PDF.js.
+      // Passing both values makes recent PDF.js releases ignore the supplied
+      // context and ask WebKit for another one with different attributes, which
+      // can leave a blank canvas in WKWebView.
+      task = pdfPage.render({ canvas: null, canvasContext: context, viewport });
       return task.promise;
     }).then(() => {
       if (!cancelled) setRendering(false);
     }).catch((reason: unknown) => {
-      if (!cancelled && !(reason instanceof Error && reason.name === "RenderingCancelledException")) {
-        setRendering(false);
-      }
+      if (cancelled || isRenderingCancelled(reason)) return;
+      setRendering(false);
+      setRenderError(errorMessage(reason));
     });
 
     return () => {
@@ -66,7 +72,16 @@ export function PdfPage({ document, page, label, dimmed = false }: PdfPageProps)
     <div className={`pdf-page ${dimmed ? "pdf-page--dimmed" : ""}`} ref={frameRef} aria-label={label}>
       <canvas ref={canvasRef} />
       {rendering && <div className="pdf-page__loading">Rendering…</div>}
+      {renderError && <div className="pdf-page__error" role="alert">{renderError}</div>}
       {!document && <div className="pdf-page__empty">No slide loaded</div>}
     </div>
   );
+}
+
+function isRenderingCancelled(reason: unknown): boolean {
+  return reason instanceof Error && reason.name === "RenderingCancelledException";
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }

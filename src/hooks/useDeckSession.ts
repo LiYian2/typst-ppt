@@ -5,8 +5,8 @@ import {
   GlobalWorkerOptions,
   type PDFDocumentLoadingTask,
   type PDFDocumentProxy,
-} from "pdfjs-dist";
-import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+} from "pdfjs-dist/legacy/build/pdf.mjs";
+import pdfWorker from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { api } from "../lib/api";
 import { navigate, type NavigationAction } from "../lib/navigation";
 import type { BuildSnapshot, PresentationState } from "../types";
