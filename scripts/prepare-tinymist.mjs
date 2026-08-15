@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -63,7 +63,11 @@ try {
   await copyFile(binary, destination);
   if (!extension) await chmod(destination, 0o755);
   if (!(await isPinnedTinymist(destination))) {
-    throw new Error(`The downloaded Tinymist binary did not report v${TINYMIST_VERSION}.`);
+    const probe = probeTinymistVersion(destination);
+    throw new Error(
+      `The downloaded Tinymist binary did not report v${TINYMIST_VERSION}. `
+      + `Exit status: ${probe.status ?? "unavailable"}. Output: ${probe.output || probe.error || "none"}`,
+    );
   }
   console.log(`Prepared Tinymist v${TINYMIST_VERSION} sidecar for ${target}.`);
 } finally {
@@ -75,12 +79,17 @@ function hostTarget() {
 }
 
 async function isPinnedTinymist(path) {
-  try {
-    const output = execFileSync(path, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    return reportsPinnedTinymistVersion(output, TINYMIST_VERSION);
-  } catch {
-    return false;
-  }
+  const probe = probeTinymistVersion(path);
+  return probe.status === 0 && reportsPinnedTinymistVersion(probe.output, TINYMIST_VERSION);
+}
+
+function probeTinymistVersion(path) {
+  const result = spawnSync(path, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return {
+    status: result.status,
+    output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim(),
+    error: result.error?.message,
+  };
 }
 
 async function download(url, destinationPath) {
