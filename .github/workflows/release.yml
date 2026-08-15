@@ -23,6 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: desktop
           workspaces: "./src-tauri -> target"
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-24.04'
