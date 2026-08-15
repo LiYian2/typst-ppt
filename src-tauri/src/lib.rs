@@ -2,6 +2,7 @@
 mod commands;
 mod engine;
 mod model;
+mod tinymist;
 
 #[cfg(feature = "desktop")]
 use model::AppState;
@@ -25,6 +26,10 @@ pub fn run() {
             commands::open_current_pdf,
             commands::source_document,
             commands::save_source,
+            commands::tinymist_status,
+            commands::start_tinymist,
+            commands::send_tinymist_message,
+            commands::stop_tinymist,
             commands::audience_open,
             commands::open_audience,
             commands::toggle_audience_fullscreen,
@@ -32,6 +37,10 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "audience" && matches!(event, WindowEvent::Destroyed) {
                 let _ = window.app_handle().emit(commands::AUDIENCE_EVENT, false);
+            }
+            if window.label() == "main" && matches!(event, WindowEvent::Destroyed) {
+                let state = window.app_handle().state::<AppState>();
+                tinymist::stop_process(&state);
             }
         })
         .run(tauri::generate_context!())

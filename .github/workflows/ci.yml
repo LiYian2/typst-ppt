@@ -24,13 +24,23 @@ jobs:
         with:
           shared-key: desktop
           workspaces: "./src-tauri -> target"
+      - uses: actions/cache@v5
+        id: tinymist-cache
+        with:
+          path: src-tauri/binaries
+          key: tinymist-v0.15.2-${{ runner.os }}-${{ runner.arch }}
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
       - run: npm ci
+      - name: Prepare pinned Tinymist sidecar
+        if: steps.tinymist-cache.outputs.cache-hit != 'true'
+        run: node scripts/prepare-tinymist.mjs
       - run: npm run lint
       - run: npm test
+      - name: Smoke-test Tinymist LSP and Web preview
+        run: npm run smoke:tinymist
       - run: npm run build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

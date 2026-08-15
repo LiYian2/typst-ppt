@@ -226,10 +226,7 @@ export function PresenterApp() {
           build={session.build}
           document={session.document}
           currentPage={session.currentPage}
-          pageCount={session.pageCount}
           note={note}
-          onPrevious={() => void session.move({ type: "previous" })}
-          onNext={() => void session.move({ type: "next" })}
         />
       ) : (
         <PresenterWorkspace

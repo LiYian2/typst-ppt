@@ -5,11 +5,26 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { basicSetup } from "codemirror";
+import type { LSPClient } from "@codemirror/lsp-client";
 import { useEffect, useRef } from "react";
+import type { TinymistSourceJump } from "../hooks/useTinymistSession";
+import { filePathToUri, uriToFilePath } from "../lib/tinymistTransport";
+import { tinymistSemanticTokens } from "../lib/tinymistSemanticTokens";
 
-interface TypstEditorProps {
+export interface TypstEditorProps {
   value: string;
-  diagnostics: string[];
+  /** Absolute source path used for the LSP textDocument URI. */
+  path?: string;
+  /** Active Tinymist client. When absent the editor uses its safe fallback. */
+  client?: LSPClient | null;
+  /** Source range sent by Tinymist's preview or definition navigation. */
+  jump?: TinymistSourceJump | null;
+  /** Compiler diagnostics used when Tinymist is unavailable. */
+  fallbackDiagnostics?: string[];
+  /** Exposes the active view so cross-file LSP navigation can finish after React mounts it. */
+  onViewReady?: (view: EditorView | null) => void;
+  /** @deprecated Kept as a compatibility alias while EditorWorkspace migrates. */
+  diagnostics?: string[];
   onChange: (value: string) => void;
   onSave: () => void;
 }
@@ -21,7 +36,7 @@ interface TypstStreamState {
 
 const keywords = new Set([
   "and", "as", "auto", "break", "context", "continue", "else", "false", "for",
-  "if", "import", "in", "include", "let", "none", "not", "or", "return", "set",
+  "if", "import", "in", "let", "none", "not", "or", "return", "set",
   "show", "true", "while",
 ]);
 
@@ -103,27 +118,42 @@ const typstHighlight = HighlightStyle.define([
   { tag: tags.operator, color: "#ff91a4" },
 ]);
 
-export function TypstEditor({ value, diagnostics, onChange, onSave }: TypstEditorProps) {
+export function TypstEditor({
+  value,
+  path,
+  client,
+  jump,
+  fallbackDiagnostics,
+  diagnostics,
+  onViewReady,
+  onChange,
+  onSave,
+}: TypstEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const initialValueRef = useRef(value);
+  const valueRef = useRef(value);
   const changeRef = useRef(onChange);
   const saveRef = useRef(onSave);
+  const readyRef = useRef(onViewReady);
 
   changeRef.current = onChange;
   saveRef.current = onSave;
-
+  readyRef.current = onViewReady;
+  valueRef.current = value;
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    const fileUri = path ? filePathToUri(path) : null;
+    const hasLanguageServer = Boolean(client && fileUri);
     const state = EditorState.create({
-      doc: initialValueRef.current,
+      doc: valueRef.current,
       extensions: [
         basicSetup,
         typstLanguage,
         syntaxHighlighting(typstHighlight),
-        autocompletion({ override: [completeFromList(completions)] }),
-        lintGutter(),
+        ...(hasLanguageServer && client && fileUri
+          ? [client.plugin(fileUri, "typst"), tinymistSemanticTokens(client, fileUri)]
+          : [autocompletion({ override: [completeFromList(completions)] }), lintGutter()]),
         keymap.of([{ key: "Mod-s", preventDefault: true, run: () => { saveRef.current(); return true; } }]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) changeRef.current(update.state.doc.toString());
@@ -138,22 +168,45 @@ export function TypstEditor({ value, diagnostics, onChange, onSave }: TypstEdito
           ".cm-tooltip": { backgroundColor: "#1b1e24", border: "1px solid rgba(255,255,255,.1)" },
           ".cm-tooltip-autocomplete > ul > li[aria-selected]": { backgroundColor: "rgba(184,242,60,.14)", color: "white" },
           ".cm-diagnostic-error": { borderLeftColor: "#ff6b6b" },
+          ".cm-tinymist-token-keyword, .cm-tinymist-token-modifier": { color: "#d6a5ff" },
+          ".cm-tinymist-token-function, .cm-tinymist-token-method, .cm-tinymist-token-macro": { color: "#8fd5ff" },
+          ".cm-tinymist-token-string, .cm-tinymist-token-regexp": { color: "#a8d279" },
+          ".cm-tinymist-token-number": { color: "#f3ba76" },
+          ".cm-tinymist-token-comment": { color: "#68707d", fontStyle: "italic" },
+          ".cm-tinymist-token-variable, .cm-tinymist-token-property, .cm-tinymist-token-parameter": { color: "#d8dee9" },
+          ".cm-tinymist-token-type, .cm-tinymist-token-class, .cm-tinymist-token-interface, .cm-tinymist-token-struct": { color: "#72d5c8" },
+          ".cm-tinymist-token-operator, .cm-tinymist-token-decorator": { color: "#ff91a4" },
         }),
       ],
     });
     const view = new EditorView({ state, parent: host });
     viewRef.current = view;
+    readyRef.current?.(view);
     return () => {
       viewRef.current = null;
+      readyRef.current?.(null);
       view.destroy();
     };
-  }, []);
+  }, [client, path]);
 
   useEffect(() => {
     const view = viewRef.current;
-    if (!view) return;
-    view.dispatch(setDiagnostics(view.state, parseDiagnostics(diagnostics, view.state.doc)));
-  }, [diagnostics]);
+    if (!view || client) return;
+    view.dispatch(setDiagnostics(view.state, parseDiagnostics(fallbackDiagnostics ?? diagnostics ?? [], view.state.doc)));
+  }, [client, diagnostics, fallbackDiagnostics]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !path || !jump || !pathsMatch(path, jump.filepath)) return;
+    if (!jump.start) return;
+    const from = offsetAt(view.state.doc, jump.start);
+    const to = offsetAt(view.state.doc, jump.end ?? jump.start);
+    view.dispatch({
+      selection: { anchor: from, head: Math.max(from, to) },
+      effects: EditorView.scrollIntoView(from, { y: "center" }),
+    });
+    view.focus();
+  }, [jump, path]);
 
   return <div className="typst-editor" ref={hostRef} />;
 }
@@ -168,4 +221,17 @@ function parseDiagnostics(messages: string[], doc: EditorState["doc"]): Diagnost
     const from = Math.min(line.to, line.from + column);
     return [{ from, to: Math.min(line.to, from + 1), severity: match[3] as "error" | "warning", message: match[4] }];
   });
+}
+
+function offsetAt(doc: EditorState["doc"], position: readonly [line: number, character: number]): number {
+  const line = doc.line(Math.min(doc.lines, Math.max(1, position[0] + 1)));
+  return Math.min(line.to, line.from + Math.max(0, position[1]));
+}
+
+function pathsMatch(left: string, right: string): boolean {
+  const leftPath = uriToFilePath(left) ?? left;
+  const rightPath = uriToFilePath(right) ?? right;
+  const normalizedLeft = leftPath.replaceAll("\\", "/").replace(/\/$/, "");
+  const normalizedRight = rightPath.replaceAll("\\", "/").replace(/\/$/, "");
+  return normalizedLeft === normalizedRight || normalizedLeft.toLowerCase() === normalizedRight.toLowerCase();
 }
