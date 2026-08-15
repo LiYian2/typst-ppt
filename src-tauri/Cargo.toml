@@ -1,0 +1,26 @@
+[package]
+name = "typst-presenter"
+version = "0.1.0"
+description = "Live presenter console for Typst slide decks"
+authors = ["Typst Presenter contributors"]
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "typst_presenter_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:notify", "dep:open", "dep:tauri", "dep:tauri-plugin-dialog"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+notify = { version = "8", optional = true }
+open = { version = "5", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
