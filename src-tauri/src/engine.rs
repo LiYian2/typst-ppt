@@ -6,9 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+static TYPST_PACKAGE_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
 pub struct BuildOutcome {
     pub snapshot: BuildSnapshot,
@@ -27,6 +29,91 @@ pub fn typst_version() -> Result<String, String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+pub fn typst_package_roots() -> &'static [PathBuf] {
+    TYPST_PACKAGE_ROOTS.get_or_init(discover_typst_package_roots)
+}
+
+fn discover_typst_package_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(output) = typst_command()
+        .arg("info")
+        .arg("--format")
+        .arg("json")
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
+                roots.extend(package_roots_from_info(&value));
+            }
+        }
+    }
+    for variable in ["TYPST_PACKAGE_PATH", "TYPST_PACKAGE_CACHE_PATH"] {
+        if let Some(path) = env::var_os(variable) {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                roots.push(path);
+            }
+        }
+    }
+    append_default_package_roots(&mut roots);
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn push_absolute_package_root(roots: &mut Vec<PathBuf>, base: Option<OsString>, suffix: &str) {
+    let Some(base) = base.map(PathBuf::from).filter(|path| path.is_absolute()) else {
+        return;
+    };
+    roots.push(base.join(suffix));
+}
+
+fn append_default_package_roots(roots: &mut Vec<PathBuf>) {
+    #[cfg(target_os = "macos")]
+    {
+        let home = env::var_os("HOME");
+        push_absolute_package_root(
+            roots,
+            home.clone(),
+            "Library/Application Support/typst/packages",
+        );
+        push_absolute_package_root(roots, home, "Library/Caches/typst/packages");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = env::var_os("HOME");
+        let data_home = env::var_os("XDG_DATA_HOME").filter(|path| Path::new(path).is_absolute());
+        if data_home.is_some() {
+            push_absolute_package_root(roots, data_home, "typst/packages");
+        } else {
+            push_absolute_package_root(roots, home.clone(), ".local/share/typst/packages");
+        }
+        let cache_home = env::var_os("XDG_CACHE_HOME").filter(|path| Path::new(path).is_absolute());
+        if cache_home.is_some() {
+            push_absolute_package_root(roots, cache_home, "typst/packages");
+        } else {
+            push_absolute_package_root(roots, home, ".cache/typst/packages");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        push_absolute_package_root(roots, env::var_os("APPDATA"), "typst/packages");
+        push_absolute_package_root(roots, env::var_os("LOCALAPPDATA"), "typst/packages");
+    }
+}
+
+fn package_roots_from_info(value: &Value) -> Vec<PathBuf> {
+    let Some(packages) = value.get("packages") else {
+        return Vec::new();
+    };
+    ["package-path", "package-cache-path"]
+        .into_iter()
+        .filter_map(|key| packages.get(key).and_then(Value::as_str))
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .collect()
 }
 
 pub fn build_deck(source_path: &Path, root: &Path) -> BuildOutcome {
@@ -387,6 +474,37 @@ mod tests {
     #[test]
     fn missing_pdfpc_pages_is_an_empty_notes_collection() {
         assert!(parse_pdfpc_notes(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn reads_package_roots_from_typst_info() {
+        let value = json!({
+            "packages": {
+                "package-path": "/data/typst/packages",
+                "package-cache-path": "/cache/typst/packages"
+            }
+        });
+        assert_eq!(
+            package_roots_from_info(&value),
+            vec![
+                PathBuf::from("/data/typst/packages"),
+                PathBuf::from("/cache/typst/packages"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_relative_package_roots_from_typst_info() {
+        let value = json!({
+            "packages": {
+                "package-path": "relative/packages",
+                "package-cache-path": "/cache/typst/packages"
+            }
+        });
+        assert_eq!(
+            package_roots_from_info(&value),
+            vec![PathBuf::from("/cache/typst/packages")]
+        );
     }
 
     #[test]

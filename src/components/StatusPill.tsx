@@ -1,5 +1,6 @@
 import { Check, CircleAlert, LoaderCircle } from "lucide-react";
 import type { BuildSnapshot } from "../types";
+import { pdfReadyLabel } from "../lib/buildStatus";
 
 export function StatusPill({ build, loading }: { build: BuildSnapshot | null; loading: boolean }) {
   if (loading) {
@@ -18,8 +19,11 @@ export function StatusPill({ build, loading }: { build: BuildSnapshot | null; lo
     );
   }
   return (
-    <span className="status-pill status-pill--ready">
-      <Check size={14} /> Live · {build.elapsedMs} ms
+    <span
+      className="status-pill status-pill--ready"
+      title="Typst PDF compilation and speaker-note extraction time"
+    >
+      <Check size={14} /> {pdfReadyLabel(build.elapsedMs)}
     </span>
   );
 }

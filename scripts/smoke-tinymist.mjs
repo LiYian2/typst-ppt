@@ -75,7 +75,7 @@ try {
     command: "tinymist.scrollPreview",
     arguments: [
       "typst-presenter-smoke",
-      { event: "panelScrollByPosition", position: { page_no: 0, x: 0, y: 0 } },
+      { event: "panelScrollByPosition", position: { page_no: 1, x: 0, y: 0 } },
     ],
   });
 

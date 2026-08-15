@@ -49,11 +49,13 @@ pub struct PresentationState {
 pub struct SourceDocument {
     pub path: String,
     pub text: String,
+    pub read_only: bool,
 }
 
 #[cfg(feature = "desktop")]
 pub struct Session {
     pub source_path: PathBuf,
+    pub source_root: PathBuf,
     pub root: PathBuf,
     pub output_path: Option<PathBuf>,
     pub snapshot: BuildSnapshot,

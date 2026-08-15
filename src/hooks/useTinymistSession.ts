@@ -258,7 +258,7 @@ export function tinymistPageScrollRequest(currentPage: number) {
       PREVIEW_TASK_ID,
       {
         event: "panelScrollByPosition",
-        position: { page_no: currentPage, x: 0, y: 0 },
+        position: { page_no: currentPage + 1, x: 0, y: 0 },
       },
     ],
   };
