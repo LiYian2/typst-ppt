@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { BuildSnapshot, PresentationState } from "../types";
+import type { BuildSnapshot, PresentationState, SourceDocument } from "../types";
 
 export async function chooseDeck(): Promise<string | null> {
   const selected = await open({
@@ -22,6 +22,9 @@ export const api = {
     invoke<PresentationState>("set_current_page", { page }),
   pdfBytes: () => invoke<ArrayBuffer>("pdf_bytes"),
   openCurrentPdf: () => invoke<void>("open_current_pdf"),
+  sourceDocument: () => invoke<SourceDocument>("source_document"),
+  saveSource: (text: string) => invoke<void>("save_source", { text }),
+  audienceOpen: () => invoke<boolean>("audience_open"),
   openAudience: () => invoke<void>("open_audience"),
   toggleAudienceFullscreen: () => invoke<boolean>("toggle_audience_fullscreen"),
 };

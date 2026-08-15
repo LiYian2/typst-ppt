@@ -1,6 +1,7 @@
 use crate::engine;
 use crate::model::{
-    AppState, BuildSnapshot, BuildStatus, PresentationState, Session, WatchController,
+    AppState, BuildSnapshot, BuildStatus, PresentationState, Session, SourceDocument,
+    WatchController,
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
@@ -13,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 
 const BUILD_EVENT: &str = "deck-build";
 const PRESENTATION_EVENT: &str = "presentation-state";
+pub const AUDIENCE_EVENT: &str = "audience-state";
 
 #[tauri::command]
 pub fn typst_status() -> Result<String, String> {
@@ -35,6 +37,7 @@ pub fn load_deck(
     let initial = engine::build_deck(&source_path, &root);
     let snapshot = initial.snapshot.clone();
     let output_path = initial.output_path;
+    let root = initial.root;
 
     *state.session.lock().map_err(lock_error)? = Some(Session {
         source_path: source_path.clone(),
@@ -120,10 +123,44 @@ pub fn open_current_pdf(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn source_document(state: State<'_, AppState>) -> Result<SourceDocument, String> {
+    let path = {
+        let session = state.session.lock().map_err(lock_error)?;
+        session
+            .as_ref()
+            .map(|session| session.source_path.clone())
+            .ok_or_else(|| "No deck is open.".to_owned())?
+    };
+    let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    Ok(SourceDocument {
+        path: path.to_string_lossy().into_owned(),
+        text,
+    })
+}
+
+#[tauri::command]
+pub fn save_source(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    let path = {
+        let session = state.session.lock().map_err(lock_error)?;
+        session
+            .as_ref()
+            .map(|session| session.source_path.clone())
+            .ok_or_else(|| "No deck is open.".to_owned())?
+    };
+    fs::write(path, text).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn audience_open(app: AppHandle) -> bool {
+    app.get_webview_window("audience").is_some()
+}
+
+#[tauri::command]
 pub fn open_audience(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("audience") {
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
+        let _ = app.emit(AUDIENCE_EVENT, true);
         return Ok(());
     }
 
@@ -138,6 +175,7 @@ pub fn open_audience(app: AppHandle) -> Result<(), String> {
     .decorations(true)
     .build()
     .map_err(|error| error.to_string())?;
+    let _ = app.emit(AUDIENCE_EVENT, true);
     Ok(())
 }
 
@@ -231,6 +269,7 @@ fn build_current(app: &AppHandle, state: &State<'_, AppState>) -> Option<BuildSn
     {
         let mut session = state.session.lock().ok()?;
         let session = session.as_mut()?;
+        session.root = outcome.root;
         if outcome.snapshot.status == BuildStatus::Ready {
             session.output_path = outcome.output_path;
             session.snapshot = outcome.snapshot.clone();

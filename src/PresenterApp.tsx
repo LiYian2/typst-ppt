@@ -1,22 +1,36 @@
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
+  Code2,
   Expand,
   ExternalLink,
   FileCode2,
   FolderOpen,
+  LayoutDashboard,
   MonitorUp,
+  Presentation,
   RefreshCw,
   RotateCcw,
 } from "lucide-react";
 import { IconButton } from "./components/IconButton";
-import { PdfPage } from "./components/PdfPage";
+import { EditorWorkspace } from "./components/EditorWorkspace";
+import { LayoutSettings } from "./components/LayoutSettings";
+import { PresenterWorkspace } from "./components/PresenterWorkspace";
 import { StatusPill } from "./components/StatusPill";
 import { useDeckSession } from "./hooks/useDeckSession";
 import { useTimer } from "./hooks/useTimer";
 import { api, chooseDeck } from "./lib/api";
+import {
+  defaultLayoutPreferences,
+  parseLayoutPreferences,
+  type LayoutKind,
+  type PaneContent,
+} from "./lib/layout";
 import { actionForKey } from "./lib/navigation";
+
+const LAYOUT_STORAGE_KEY = "typst-presenter.layout.v1";
 
 export function PresenterApp() {
   const session = useDeckSession();
@@ -25,10 +39,42 @@ export function PresenterApp() {
   const { reset: resetTimer } = timer;
   const [actionError, setActionError] = useState<string | null>(null);
   const [typstStatus, setTypstStatus] = useState("Checking Typst…");
+  const [layoutOpen, setLayoutOpen] = useState(false);
+  const [editorMode, setEditorMode] = useState(false);
+  const [audienceOpen, setAudienceOpen] = useState(false);
+  const [layoutPreferences, setLayoutPreferences] = useState(loadLayoutPreferences);
 
   useEffect(() => {
     void api.typstStatus().then(setTypstStatus).catch((reason) => setTypstStatus(String(reason)));
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<boolean>("audience-state", (event) => {
+      if (disposed) return;
+      setAudienceOpen(event.payload);
+      if (event.payload) setEditorMode(false);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    void api.audienceOpen().then((open) => {
+      if (!disposed) setAudienceOpen(open);
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layoutPreferences));
+    } catch {
+      // A locked-down WebView can deny storage; the in-memory layout still works.
+    }
+  }, [layoutPreferences]);
 
   const run = useCallback(async (action: () => Promise<unknown>) => {
     setActionError(null);
@@ -49,8 +95,9 @@ export function PresenterApp() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (layoutOpen || editorMode) return;
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, [contenteditable=true]")) return;
+      if (target?.matches("input, select, textarea, [contenteditable=true]")) return;
       const action = actionForKey(event.key);
       if (action) {
         event.preventDefault();
@@ -65,7 +112,7 @@ export function PresenterApp() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [move, resetTimer, run]);
+  }, [editorMode, layoutOpen, move, resetTimer, run]);
 
   const note = useMemo(
     () => session.build?.notes.find((item) => item.page === session.currentPage),
@@ -74,6 +121,34 @@ export function PresenterApp() {
   const sourceName = session.build ? fileName(session.build.sourcePath) : null;
   const diagnostics = session.build?.status === "error" ? session.build.diagnostics : [];
   const visibleError = session.error ?? actionError;
+  const layoutKind = layoutPreferences.kind;
+  const layoutAssignments = layoutPreferences.assignments[layoutKind];
+
+  const changeLayoutKind = useCallback((kind: LayoutKind) => {
+    setLayoutPreferences((current) => ({ ...current, kind }));
+  }, []);
+
+  const changePaneContent = useCallback((index: number, content: PaneContent) => {
+    setLayoutPreferences((current) => {
+      const assignments = [...current.assignments[current.kind]];
+      const duplicateIndex = assignments.indexOf(content);
+      if (duplicateIndex >= 0 && duplicateIndex !== index) {
+        assignments[duplicateIndex] = assignments[index];
+      }
+      assignments[index] = content;
+      return {
+        ...current,
+        assignments: { ...current.assignments, [current.kind]: assignments },
+      };
+    });
+  }, []);
+
+  const changeSplit = useCallback((split: number) => {
+    setLayoutPreferences((current) => ({
+      ...current,
+      splits: { ...current.splits, [current.kind]: split },
+    }));
+  }, []);
 
   if (!session.document && !session.build) {
     return (
@@ -101,6 +176,7 @@ export function PresenterApp() {
   }
 
   return (
+    <>
     <main className="app-shell">
       <header className="app-header">
         <div className="brand-cluster">
@@ -114,6 +190,17 @@ export function PresenterApp() {
         <StatusPill build={session.build} loading={session.loading} />
 
         <div className="header-actions">
+          <IconButton
+            icon={<LayoutDashboard size={18} />}
+            label="Configure presenter layout"
+            onClick={() => setLayoutOpen(true)}
+          />
+          {!audienceOpen && (
+            <button className="secondary-button mode-button" onClick={() => setEditorMode((value) => !value)}>
+              {editorMode ? <Presentation size={17} /> : <Code2 size={17} />}
+              {editorMode ? "Presenter view" : "Edit source"}
+            </button>
+          )}
           <IconButton icon={<FolderOpen size={18} />} label="Open deck" onClick={() => void selectDeck()} />
           <IconButton icon={<RefreshCw size={18} />} label="Rebuild now" onClick={() => void session.rebuild()} />
           <IconButton
@@ -133,39 +220,29 @@ export function PresenterApp() {
         </div>
       </header>
 
-      <section className="presenter-grid">
-        <article className="panel current-panel">
-          <div className="panel-label">
-            <span>On air</span>
-            <span>{session.currentPage + 1} / {session.pageCount}</span>
-          </div>
-          <PdfPage document={session.document} page={session.currentPage} label="Current slide" />
-        </article>
-
-        <aside className="side-stack">
-          <article className="panel next-panel">
-            <div className="panel-label">
-              <span>Next</span>
-              <span>{Math.min(session.currentPage + 2, session.pageCount)} / {session.pageCount}</span>
-            </div>
-            {session.currentPage + 1 < session.pageCount ? (
-              <PdfPage document={session.document} page={session.currentPage + 1} label="Next slide" dimmed />
-            ) : (
-              <div className="end-card">End of deck</div>
-            )}
-          </article>
-
-          <article className="panel notes-panel">
-            <div className="panel-label">
-              <span>Speaker notes</span>
-              {note?.label && <span>slide {note.label}{note.overlay ? ` · step ${note.overlay}` : ""}</span>}
-            </div>
-            <div className={note?.text ? "notes-copy" : "notes-copy notes-copy--empty"}>
-              {note?.text || "No notes for this slide."}
-            </div>
-          </article>
-        </aside>
-      </section>
+      {editorMode ? (
+        <EditorWorkspace
+          key={session.build?.sourcePath}
+          build={session.build}
+          document={session.document}
+          currentPage={session.currentPage}
+          pageCount={session.pageCount}
+          note={note}
+          onPrevious={() => void session.move({ type: "previous" })}
+          onNext={() => void session.move({ type: "next" })}
+        />
+      ) : (
+        <PresenterWorkspace
+          kind={layoutKind}
+          assignments={layoutAssignments}
+          split={layoutPreferences.splits[layoutKind]}
+          document={session.document}
+          currentPage={session.currentPage}
+          pageCount={session.pageCount}
+          note={note}
+          onSplitChange={changeSplit}
+        />
+      )}
 
       {(diagnostics.length > 0 || visibleError) && (
         <section className="diagnostics" role="alert">
@@ -211,9 +288,26 @@ export function PresenterApp() {
         </div>
       </footer>
     </main>
+    <LayoutSettings
+      open={layoutOpen}
+      kind={layoutKind}
+      assignments={layoutAssignments}
+      onKindChange={changeLayoutKind}
+      onAssignmentChange={changePaneContent}
+      onClose={() => setLayoutOpen(false)}
+    />
+    </>
   );
 }
 
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
+}
+
+function loadLayoutPreferences() {
+  try {
+    return parseLayoutPreferences(localStorage.getItem(LAYOUT_STORAGE_KEY));
+  } catch {
+    return defaultLayoutPreferences();
+  }
 }

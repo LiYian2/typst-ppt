@@ -42,6 +42,13 @@ pub struct PresentationState {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDocument {
+    pub path: String,
+    pub text: String,
+}
+
 #[cfg(feature = "desktop")]
 pub struct Session {
     pub source_path: PathBuf,

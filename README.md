@@ -8,12 +8,18 @@ shows Touying speaker notes in real time.
 
 - Watches the whole deck directory for source and asset changes.
 - Compiles revisioned PDFs with the local Typst CLI.
+- Automatically expands the Typst project root when a deck references assets in
+  a parent directory.
 - Keeps the last good PDF visible when the current source has errors.
 - Reads Touying `#speaker-note[...]` content from pdfpc metadata.
+- Detects Touying side-by-side second-screen PDFs and shows only the slide half;
+  scripts stay in the private notes panel and never reach the audience window.
 - Provides current/next previews, notes, timer, slide navigation, and keyboard
   controls in the presenter view.
 - Opens a separate audience window and can hand the current PDF to the operating
   system's default viewer.
+- Provides an audience-safe editing mode with Typst highlighting, completions,
+  inline build diagnostics, autosave, slide preview, and speaker notes.
 - Runs on Linux, macOS, and Windows through Tauri 2.
 
 ## Prerequisites
@@ -70,6 +76,7 @@ panel.
 | First / last slide | `Home` / `End` |
 | Toggle audience fullscreen | `F` |
 | Reset timer | `R` |
+| Save in editing mode | `Cmd/Ctrl-S` |
 
 ## License
 

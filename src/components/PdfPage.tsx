@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
+import { pdfPageCrop } from "../lib/pdfLayout";
 
 interface PdfPageProps {
   document: PDFDocumentProxy | null;
@@ -38,22 +39,42 @@ export function PdfPage({ document, page, label, dimmed = false }: PdfPageProps)
     void document.getPage(page + 1).then((pdfPage) => {
       if (cancelled) return;
       const base = pdfPage.getViewport({ scale: 1 });
-      const cssScale = Math.min(size.width / base.width, size.height / base.height);
+      const crop = pdfPageCrop(base.width, base.height);
+      const visibleBaseWidth = base.width * crop.visibleWidthRatio;
+      const cssScale = Math.min(size.width / visibleBaseWidth, size.height / base.height);
       const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
       const viewport = pdfPage.getViewport({ scale: cssScale * pixelRatio });
-      const context = canvas.getContext("2d", { alpha: false });
-      if (!context) return;
-
-      canvas.width = Math.max(1, Math.floor(viewport.width));
+      const visibleViewportWidth = viewport.width * crop.visibleWidthRatio;
+      canvas.width = Math.max(1, Math.floor(visibleViewportWidth));
       canvas.height = Math.max(1, Math.floor(viewport.height));
-      canvas.style.width = `${viewport.width / pixelRatio}px`;
+      canvas.style.width = `${visibleViewportWidth / pixelRatio}px`;
       canvas.style.height = `${viewport.height / pixelRatio}px`;
+      const renderCanvas = crop.cropped ? globalThis.document.createElement("canvas") : canvas;
+      renderCanvas.width = Math.max(1, Math.floor(viewport.width));
+      renderCanvas.height = Math.max(1, Math.floor(viewport.height));
+      const context = renderCanvas.getContext("2d", { alpha: false });
+      if (!context) return;
       // The context-only API is the compatibility path documented by PDF.js.
       // Passing both values makes recent PDF.js releases ignore the supplied
       // context and ask WebKit for another one with different attributes, which
       // can leave a blank canvas in WKWebView.
       task = pdfPage.render({ canvas: null, canvasContext: context, viewport });
-      return task.promise;
+      return task.promise.then(() => {
+        if (!crop.cropped || cancelled) return;
+        const visibleContext = canvas.getContext("2d", { alpha: false });
+        if (!visibleContext) return;
+        visibleContext.drawImage(
+          renderCanvas,
+          0,
+          0,
+          canvas.width,
+          canvas.height,
+          0,
+          0,
+          canvas.width,
+          canvas.height,
+        );
+      });
     }).then(() => {
       if (!cancelled) setRendering(false);
     }).catch((reason: unknown) => {

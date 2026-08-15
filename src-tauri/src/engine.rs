@@ -13,6 +13,7 @@ static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
 pub struct BuildOutcome {
     pub snapshot: BuildSnapshot,
     pub output_path: Option<PathBuf>,
+    pub root: PathBuf,
 }
 
 pub fn typst_version() -> Result<String, String> {
@@ -44,31 +45,44 @@ pub fn build_deck(source_path: &Path, root: &Path) -> BuildOutcome {
             version,
             started,
             format!("Unable to create the build directory: {error}"),
+            root.to_path_buf(),
         );
     }
 
     let output_path = output_dir.join(format!("deck-{revision}.pdf"));
-    let compile = typst_command()
-        .arg("compile")
-        .arg("--diagnostic-format")
-        .arg("short")
-        .arg("--root")
-        .arg(root)
-        .arg(source_path)
-        .arg(&output_path)
-        .output();
+    let mut effective_root = root.to_path_buf();
+    let compile = loop {
+        let compile = typst_command()
+            .arg("compile")
+            .arg("--diagnostic-format")
+            .arg("short")
+            .arg("--root")
+            .arg(&effective_root)
+            .arg(source_path)
+            .arg(&output_path)
+            .output();
 
-    let compile = match compile {
-        Ok(output) => output,
-        Err(error) => {
-            return failure(
-                revision,
-                source_display,
-                version,
-                started,
-                typst_missing_message(&error),
-            )
+        let compile = match compile {
+            Ok(output) => output,
+            Err(error) => {
+                return failure(
+                    revision,
+                    source_display,
+                    version,
+                    started,
+                    typst_missing_message(&error),
+                    effective_root,
+                )
+            }
+        };
+
+        if compile.status.success() || !root_escape_diagnostic(&compile.stderr) {
+            break compile;
         }
+        let Some(parent) = next_project_root(&effective_root) else {
+            break compile;
+        };
+        effective_root = parent;
     };
 
     if !compile.status.success() {
@@ -85,11 +99,12 @@ pub fn build_deck(source_path: &Path, root: &Path) -> BuildOutcome {
                 typst_version: version,
             },
             output_path: None,
+            root: effective_root,
         };
     }
 
     prune_old_builds(&output_dir, 8);
-    let notes = query_speaker_notes(source_path, root).unwrap_or_default();
+    let notes = query_speaker_notes(source_path, &effective_root).unwrap_or_default();
     let output_display = output_path.to_string_lossy().into_owned();
     BuildOutcome {
         snapshot: BuildSnapshot {
@@ -103,6 +118,7 @@ pub fn build_deck(source_path: &Path, root: &Path) -> BuildOutcome {
             typst_version: version,
         },
         output_path: Some(output_path),
+        root: effective_root,
     }
 }
 
@@ -112,6 +128,7 @@ fn failure(
     version: String,
     started: Instant,
     diagnostic: String,
+    root: PathBuf,
 ) -> BuildOutcome {
     BuildOutcome {
         snapshot: BuildSnapshot {
@@ -125,7 +142,19 @@ fn failure(
             typst_version: version,
         },
         output_path: None,
+        root,
     }
+}
+
+fn root_escape_diagnostic(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("would escape the project root")
+}
+
+fn next_project_root(root: &Path) -> Option<PathBuf> {
+    let parent = root.parent()?;
+    // Never turn a document error into an unrestricted filesystem root. A deck
+    // may climb through normal project folders, but `/` itself is not a project.
+    (parent.parent().is_some()).then(|| parent.to_path_buf())
 }
 
 fn typst_missing_message(error: &std::io::Error) -> String {
@@ -396,5 +425,25 @@ mod tests {
 
         assert_eq!(resolved, OsString::from(path_typst));
         fs::remove_dir_all(test_root).expect("remove resolver test directory");
+    }
+
+    #[test]
+    fn recognises_project_root_escape_diagnostics() {
+        assert!(root_escape_diagnostic(
+            br#"main.typ:4:9: error: path `\"../notes.md\"` would escape the project root"#
+        ));
+        assert!(!root_escape_diagnostic(
+            b"main.typ:4:9: error: unknown variable"
+        ));
+    }
+
+    #[test]
+    fn expands_project_root_without_reaching_filesystem_root() {
+        assert_eq!(
+            next_project_root(Path::new("/Users/leo/slides")),
+            Some(PathBuf::from("/Users/leo"))
+        );
+        assert_eq!(next_project_root(Path::new("/Users")), None);
+        assert_eq!(next_project_root(Path::new("/")), None);
     }
 }

@@ -22,3 +22,8 @@ export interface PresentationState {
   currentPage: number;
   revision: number;
 }
+
+export interface SourceDocument {
+  path: string;
+  text: string;
+}
