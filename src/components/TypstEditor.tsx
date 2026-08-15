@@ -21,6 +21,8 @@ export interface TypstEditorProps {
   jump?: TinymistSourceJump | null;
   /** Compiler diagnostics used when Tinymist is unavailable. */
   fallbackDiagnostics?: string[];
+  /** Exposes the active view so cross-file LSP navigation can finish after React mounts it. */
+  onViewReady?: (view: EditorView | null) => void;
   /** @deprecated Kept as a compatibility alias while EditorWorkspace migrates. */
   diagnostics?: string[];
   onChange: (value: string) => void;
@@ -123,24 +125,28 @@ export function TypstEditor({
   jump,
   fallbackDiagnostics,
   diagnostics,
+  onViewReady,
   onChange,
   onSave,
 }: TypstEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const initialValueRef = useRef(value);
+  const valueRef = useRef(value);
   const changeRef = useRef(onChange);
   const saveRef = useRef(onSave);
+  const readyRef = useRef(onViewReady);
 
   changeRef.current = onChange;
   saveRef.current = onSave;
+  readyRef.current = onViewReady;
+  valueRef.current = value;
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const fileUri = path ? filePathToUri(path) : null;
     const hasLanguageServer = Boolean(client && fileUri);
     const state = EditorState.create({
-      doc: initialValueRef.current,
+      doc: valueRef.current,
       extensions: [
         basicSetup,
         typstLanguage,
@@ -175,8 +181,10 @@ export function TypstEditor({
     });
     const view = new EditorView({ state, parent: host });
     viewRef.current = view;
+    readyRef.current?.(view);
     return () => {
       viewRef.current = null;
+      readyRef.current?.(null);
       view.destroy();
     };
   }, [client, path]);

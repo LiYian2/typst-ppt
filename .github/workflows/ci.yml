@@ -39,6 +39,8 @@ jobs:
         run: node scripts/prepare-tinymist.mjs
       - run: npm run lint
       - run: npm test
+      - name: Smoke-test Tinymist LSP and Web preview
+        run: npm run smoke:tinymist
       - run: npm run build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

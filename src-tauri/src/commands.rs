@@ -45,8 +45,8 @@ pub fn send_tinymist_message(
 }
 
 #[tauri::command]
-pub fn stop_tinymist(state: State<'_, AppState>) -> Result<(), String> {
-    tinymist::stop_process(&state);
+pub fn stop_tinymist(state: State<'_, AppState>, generation: Option<u64>) -> Result<(), String> {
+    tinymist::stop_process_generation(&state, generation);
     Ok(())
 }
 

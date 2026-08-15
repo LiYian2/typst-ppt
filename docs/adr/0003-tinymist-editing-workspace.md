@@ -35,10 +35,14 @@ speaker-note query, and last-good-build behavior for presenter and audience
 view. Tinymist is optional and editor-only; its absence or failure must not
 replace or blank the last good PDF.
 
-Release packaging pins Tinymist v0.15.2 when a sidecar is bundled. Development
-and fallback resolution may use `TINYMIST_PATH`, `PATH`, and common platform
-install locations. Preview networking is restricted to loopback HTTP and
-WebSocket addresses and does not introduce a cloud dependency.
+Release packaging always pins and bundles Tinymist v0.15.2. Producing a Tauri
+bundle therefore requires the verified sidecar (downloaded once or restored
+from cache), while an installed application never downloads it at runtime.
+Runtime resolution may also use `TINYMIST_PATH`, `PATH`, and common platform
+install locations. Tinymist remains optional to presentation behavior: an
+unavailable or failed editor service cannot disable presenter or audience view.
+Preview networking is restricted to loopback HTTP and WebSocket addresses and
+does not introduce a cloud dependency.
 
 ## Consequences
 

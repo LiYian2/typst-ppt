@@ -1,6 +1,7 @@
 import { LSPClient, languageServerExtensions } from "@codemirror/lsp-client";
 import type { EditorView } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import {
   createTauriTinymistChannel,
@@ -42,6 +43,11 @@ export interface TinymistPreviewResult {
   isPrimary?: boolean;
 }
 
+export interface TinymistLogEvent {
+  generation: number;
+  message: string;
+}
+
 export function useTinymistSession(
   sourcePath: string | null,
   onSourceJump?: (jump: TinymistSourceJump) => void,
@@ -60,26 +66,24 @@ export function useTinymistSession(
     let cancelled = false;
     let activeClient: LSPClient | null = null;
     let activeChannel: Awaited<ReturnType<typeof createTauriTinymistChannel>> | null = null;
+    let activeGeneration: number | null = null;
+    let activeLogUnlisten: UnlistenFn | null = null;
 
     const cleanup = async () => {
       if (activeClient) {
-        try {
-          await activeClient.request("workspace/executeCommand", {
-            command: "tinymist.doKillPreview",
-            arguments: [PREVIEW_TASK_ID],
-          });
-        } catch {
-          // Tinymist may already have disposed the preview task.
-        }
-        activeClient.disconnect();
+        await shutdownTinymistClient(activeClient);
         activeClient = null;
       }
       activeChannel?.dispose();
       activeChannel = null;
-      try {
-        await invoke<void>("stop_tinymist");
-      } catch {
-        // A missing/expired backend process is already stopped.
+      activeLogUnlisten?.();
+      activeLogUnlisten = null;
+      if (activeGeneration !== null) {
+        try {
+          await invoke<void>("stop_tinymist", { generation: activeGeneration });
+        } catch {
+          // A missing/expired backend process is already stopped.
+        }
       }
     };
 
@@ -126,10 +130,39 @@ export function useTinymistSession(
         }
         return;
       }
-      if (cancelled) return;
+      activeGeneration = info.generation;
+      if (cancelled) {
+        try {
+          await invoke<void>("stop_tinymist", { generation: activeGeneration });
+        } catch {
+          // The process already stopped while the component was leaving.
+        }
+        return;
+      }
 
       try {
+        activeLogUnlisten = await listen<TinymistLogEvent>("tinymist-log", (event) => {
+          const message = tinymistStoppedMessage(info.generation, event.payload);
+          if (!cancelled && message) {
+            setStatus((current) => ({ ...current, phase: "error", error: message }));
+            setError(message);
+            setPreviewUrl(null);
+            setClient(null);
+          }
+        });
+        if (cancelled) {
+          activeLogUnlisten();
+          activeLogUnlisten = null;
+          await invoke<void>("stop_tinymist", { generation: info.generation }).catch(() => undefined);
+          return;
+        }
         activeChannel = await createTauriTinymistChannel();
+        if (cancelled) {
+          activeChannel.dispose();
+          activeChannel = null;
+          await invoke<void>("stop_tinymist", { generation: info.generation }).catch(() => undefined);
+          return;
+        }
         const baseTransport = createTinymistTransport(activeChannel, info.generation, (reason) => {
           if (!cancelled) setError(errorMessage(reason));
         });
@@ -176,17 +209,7 @@ export function useTinymistSession(
           TinymistPreviewResult
         >("workspace/executeCommand", {
           command: "tinymist.doStartPreview",
-          arguments: [[
-            "--task-id",
-            PREVIEW_TASK_ID,
-            "--data-plane-host",
-            "127.0.0.1:0",
-            "--preview-mode",
-            "slide",
-            "--partial-rendering",
-            "--no-open",
-            info.sourcePath,
-          ]],
+          arguments: [tinymistPreviewArguments(info.sourcePath)],
         });
         const url = parsePreviewUrl(result);
         if (cancelled) return;
@@ -211,6 +234,60 @@ export function useTinymistSession(
   }, [sourcePath]);
 
   return { client, status, previewUrl, error };
+}
+
+export function tinymistPreviewArguments(sourcePath: string): string[] {
+  return [
+    "--task-id",
+    PREVIEW_TASK_ID,
+    "--data-plane-host",
+    "127.0.0.1:0",
+    "--preview-mode",
+    "slide",
+    "--partial-rendering",
+    "true",
+    "--no-open",
+    sourcePath,
+  ];
+}
+
+export function tinymistPageScrollRequest(currentPage: number) {
+  return {
+    command: "tinymist.scrollPreview",
+    arguments: [
+      PREVIEW_TASK_ID,
+      {
+        event: "panelScrollByPosition",
+        position: { page_no: currentPage, x: 0, y: 0 },
+      },
+    ],
+  };
+}
+
+interface TinymistLifecycleClient {
+  request: (method: string, params: unknown) => Promise<unknown>;
+  notification: (method: string, params: unknown) => void;
+  disconnect: () => void;
+}
+
+/** Stop the preview task, perform the LSP shutdown handshake, then detach. */
+export async function shutdownTinymistClient(client: TinymistLifecycleClient): Promise<void> {
+  try {
+    await client.request("workspace/executeCommand", {
+      command: "tinymist.doKillPreview",
+      arguments: [PREVIEW_TASK_ID],
+    });
+  } catch {
+    // Tinymist may already have disposed the preview task.
+  }
+  try {
+    await client.request("shutdown", null);
+  } catch {
+    // The Rust-owned process remains the bounded shutdown fallback.
+  }
+  client.notification("exit", null);
+  await Promise.resolve();
+  client.disconnect();
 }
 
 export function parsePreviewUrl(result: TinymistPreviewResult | string): string {
@@ -239,6 +316,13 @@ export function sourceJumpFromParams(params: unknown): TinymistSourceJump | null
   };
 }
 
+export function tinymistStoppedMessage(
+  activeGeneration: number,
+  event: TinymistLogEvent,
+): string | null {
+  return event.generation === activeGeneration ? event.message : null;
+}
+
 function sourcePosition(value: unknown): readonly [line: number, character: number] | null {
   if (Array.isArray(value) && value.length >= 2 && value.every((part) => typeof part === "number")) {
     return [value[0], value[1]];
@@ -259,5 +343,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
+  if (reason instanceof Error) return reason.message;
+  if (isRecord(reason) && typeof reason.message === "string") {
+    const detail = typeof reason.data === "string" ? `: ${reason.data}` : "";
+    return `${reason.message}${detail}`;
+  }
+  try {
+    return typeof reason === "string" ? reason : JSON.stringify(reason);
+  } catch {
+    return String(reason);
+  }
 }

@@ -36,6 +36,13 @@ pub struct TinymistMessage {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct TinymistLog {
+    pub generation: u64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct TinymistStatus {
     pub available: bool,
     pub version: Option<String>,
@@ -297,7 +304,9 @@ pub fn tinymist_status() -> TinymistStatus {
     {
         Ok(output) if output.status.success() => TinymistStatus {
             available: true,
-            version: Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()),
+            version: Some(parse_tinymist_version(&String::from_utf8_lossy(
+                &output.stdout,
+            ))),
             executable: Some(executable.to_string_lossy().into_owned()),
             error: None,
         },
@@ -314,6 +323,23 @@ pub fn tinymist_status() -> TinymistStatus {
             error: Some(error.to_string()),
         },
     }
+}
+
+fn parse_tinymist_version(output: &str) -> String {
+    if let Some(version) = output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Build Git Describe:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }) {
+        return format!("tinymist {version}");
+    }
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("tinymist")
+        .to_owned()
 }
 
 #[cfg(feature = "desktop")]
@@ -372,12 +398,17 @@ pub fn start_tinymist(state: &AppState, app: &AppHandle) -> Result<TinymistSessi
                 },
             );
         });
-        if let Err(error) = result {
-            let _ = reader_app.emit(
-                TINYMIST_LOG_EVENT,
-                format!("Tinymist output stopped: {error}"),
-            );
-        }
+        let message = match result {
+            Ok(()) => "Tinymist stopped unexpectedly.".to_owned(),
+            Err(error) => format!("Tinymist output stopped: {error}"),
+        };
+        let _ = reader_app.emit(
+            TINYMIST_LOG_EVENT,
+            TinymistLog {
+                generation,
+                message,
+            },
+        );
     });
 
     let log_app = app.clone();
@@ -386,7 +417,13 @@ pub fn start_tinymist(state: &AppState, app: &AppHandle) -> Result<TinymistSessi
         let mut text = String::new();
         let _ = stderr.read_to_string(&mut text);
         if !text.trim().is_empty() {
-            let _ = log_app.emit(TINYMIST_LOG_EVENT, text);
+            let _ = log_app.emit(
+                TINYMIST_LOG_EVENT,
+                TinymistLog {
+                    generation,
+                    message: text,
+                },
+            );
         }
     });
 
@@ -435,11 +472,26 @@ pub fn send_tinymist_message(
 
 #[cfg(feature = "desktop")]
 pub fn stop_process(state: &AppState) {
+    stop_process_generation(state, None);
+}
+
+#[cfg(feature = "desktop")]
+pub fn stop_process_generation(state: &AppState, generation: Option<u64>) {
     if let Ok(mut process) = state.tinymist.lock() {
+        if process
+            .as_ref()
+            .is_some_and(|active| !stop_request_matches(active.generation, generation))
+        {
+            return;
+        }
         if let Some(process) = process.take() {
             process.stop();
         }
     }
+}
+
+fn stop_request_matches(active_generation: u64, requested_generation: Option<u64>) -> bool {
+    requested_generation.is_none_or(|requested| requested == active_generation)
 }
 
 #[cfg(feature = "desktop")]
@@ -578,5 +630,23 @@ mod tests {
             .expect_err("non-object JSON must be rejected");
         assert!(error.contains("JSON object"));
         stop_process(&state);
+    }
+
+    #[test]
+    fn stale_cleanup_cannot_stop_a_newer_generation() {
+        assert!(stop_request_matches(7, Some(7)));
+        assert!(!stop_request_matches(8, Some(7)));
+        assert!(stop_request_matches(8, None));
+    }
+
+    #[test]
+    fn extracts_a_compact_version_from_release_metadata() {
+        let output =
+            "tinymist \nBuild Timestamp: now\nBuild Git Describe: v0.15.2\nCommit SHA: abc";
+        assert_eq!(parse_tinymist_version(output), "tinymist v0.15.2");
+        assert_eq!(
+            parse_tinymist_version("tinymist 0.15.2\n"),
+            "tinymist 0.15.2"
+        );
     }
 }

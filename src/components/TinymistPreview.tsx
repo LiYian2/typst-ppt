@@ -6,6 +6,7 @@ export interface TinymistPreviewProps {
   url: string | null;
   status: TinymistPreviewStatus;
   error?: string | null;
+  cropSecondScreen?: boolean;
 }
 
 /**
@@ -15,14 +16,17 @@ export interface TinymistPreviewProps {
  * helper. Presenter and audience surfaces intentionally do not use this
  * component; it is an editor-only preview path.
  */
-export function TinymistPreview({ url, status, error }: TinymistPreviewProps) {
+export function TinymistPreview({ url, status, error, cropSecondScreen = false }: TinymistPreviewProps) {
   const previewUrl = url ? normalizeTinymistPreviewUrl(url) : null;
 
   if (status === "ready" && previewUrl) {
     return (
-      <section className="tinymist-preview tinymist-preview--ready" aria-label="Tinymist rendered slide preview">
+      <section
+        className={`tinymist-preview tinymist-preview--ready${cropSecondScreen ? " tinymist-preview--cropped" : ""}`}
+        aria-label="Tinymist rendered slide preview"
+      >
         <iframe
-          className="tinymist-preview__frame"
+          className={`tinymist-preview__frame${cropSecondScreen ? " tinymist-preview__frame--cropped" : ""}`}
           src={previewUrl}
           title="Tinymist rendered slide preview"
           sandbox="allow-scripts allow-same-origin"
