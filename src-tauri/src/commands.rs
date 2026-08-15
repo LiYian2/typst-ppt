@@ -3,6 +3,7 @@ use crate::model::{
     AppState, BuildSnapshot, BuildStatus, PresentationState, Session, SourceDocument,
     WatchController,
 };
+use crate::tinymist::{self, TinymistSessionInfo, TinymistStatus};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,34 @@ pub fn typst_status() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn tinymist_status() -> TinymistStatus {
+    tinymist::tinymist_status()
+}
+
+#[tauri::command]
+pub fn start_tinymist(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TinymistSessionInfo, String> {
+    tinymist::start_tinymist(&state, &app)
+}
+
+#[tauri::command]
+pub fn send_tinymist_message(
+    state: State<'_, AppState>,
+    generation: u64,
+    message: String,
+) -> Result<(), String> {
+    tinymist::send_tinymist_message(&state, generation, message)
+}
+
+#[tauri::command]
+pub fn stop_tinymist(state: State<'_, AppState>) -> Result<(), String> {
+    tinymist::stop_process(&state);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn load_deck(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -34,6 +63,7 @@ pub fn load_deck(
         .to_path_buf();
 
     stop_watching(&state);
+    tinymist::stop_process(&state);
     let initial = engine::build_deck(&source_path, &root);
     let snapshot = initial.snapshot.clone();
     let output_path = initial.output_path;
@@ -123,13 +153,16 @@ pub fn open_current_pdf(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn source_document(state: State<'_, AppState>) -> Result<SourceDocument, String> {
+pub fn source_document(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<SourceDocument, String> {
     let path = {
         let session = state.session.lock().map_err(lock_error)?;
-        session
+        let session = session
             .as_ref()
-            .map(|session| session.source_path.clone())
-            .ok_or_else(|| "No deck is open.".to_owned())?
+            .ok_or_else(|| "No deck is open.".to_owned())?;
+        resolve_source_path(session, path.as_deref())?
     };
     let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
     Ok(SourceDocument {
@@ -139,15 +172,52 @@ pub fn source_document(state: State<'_, AppState>) -> Result<SourceDocument, Str
 }
 
 #[tauri::command]
-pub fn save_source(state: State<'_, AppState>, text: String) -> Result<(), String> {
+pub fn save_source(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    text: String,
+) -> Result<(), String> {
     let path = {
         let session = state.session.lock().map_err(lock_error)?;
-        session
+        let session = session
             .as_ref()
-            .map(|session| session.source_path.clone())
-            .ok_or_else(|| "No deck is open.".to_owned())?
+            .ok_or_else(|| "No deck is open.".to_owned())?;
+        resolve_source_path(session, path.as_deref())?
     };
     fs::write(path, text).map_err(|error| error.to_string())
+}
+
+fn resolve_source_path(session: &Session, requested: Option<&str>) -> Result<PathBuf, String> {
+    let candidate = requested
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                session.root.join(path)
+            }
+        })
+        .unwrap_or_else(|| session.source_path.clone());
+    let canonical = candidate.canonicalize().map_err(|error| {
+        format!(
+            "Unable to resolve source file {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if canonical.extension().and_then(|value| value.to_str()) != Some("typ") {
+        return Err("Source jumps may only open .typ files.".to_owned());
+    }
+    let root = session
+        .root
+        .canonicalize()
+        .map_err(|error| format!("Unable to resolve deck root: {error}"))?;
+    if !canonical.starts_with(&root) {
+        return Err(format!(
+            "Source path {} is outside the deck root.",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 #[tauri::command]
@@ -298,4 +368,61 @@ fn is_relevant_event(event: &notify::Event) -> bool {
             IGNORED_DIRECTORIES.contains(&value.as_ref())
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_session(root: &Path, source_path: &Path) -> Session {
+        Session {
+            source_path: source_path.to_path_buf(),
+            root: root.to_path_buf(),
+            output_path: None,
+            snapshot: BuildSnapshot {
+                revision: 1,
+                source_path: source_path.to_string_lossy().into_owned(),
+                output_path: None,
+                status: BuildStatus::Ready,
+                diagnostics: Vec::new(),
+                notes: Vec::new(),
+                elapsed_ms: 0,
+                typst_version: "test".to_owned(),
+            },
+            current_page: 0,
+        }
+    }
+
+    #[test]
+    fn source_path_defaults_to_active_deck_and_stays_inside_root() {
+        let root = std::env::temp_dir().join(format!(
+            "typst-presenter-source-boundary-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.typ");
+        let include = root.join("chapter.typ");
+        let outside = root
+            .parent()
+            .expect("temporary root has a parent")
+            .join("outside.typ");
+        fs::write(&source, "#import \"chapter.typ\": *").unwrap();
+        fs::write(&include, "#let answer = 42").unwrap();
+        fs::write(&outside, "#let answer = 0").unwrap();
+        let session = test_session(&root, &source);
+
+        assert_eq!(
+            resolve_source_path(&session, None).unwrap(),
+            source.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_source_path(&session, Some("chapter.typ")).unwrap(),
+            include.canonicalize().unwrap()
+        );
+        assert!(resolve_source_path(&session, Some("../outside.typ")).is_err());
+        assert!(resolve_source_path(&session, Some(outside.to_str().unwrap())).is_err());
+
+        fs::remove_file(outside).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 }

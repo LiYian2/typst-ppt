@@ -1,3 +1,5 @@
+#[cfg(feature = "desktop")]
+use crate::tinymist::TinymistProcess;
 use serde::Serialize;
 #[cfg(feature = "desktop")]
 use std::path::PathBuf;
@@ -70,4 +72,5 @@ pub struct WatchController {
 pub struct AppState {
     pub session: Mutex<Option<Session>>,
     pub watcher: Mutex<Option<WatchController>>,
+    pub tinymist: Mutex<Option<TinymistProcess>>,
 }
