@@ -7,6 +7,7 @@ export interface TinymistPreviewProps {
   status: TinymistPreviewStatus;
   error?: string | null;
   cropSecondScreen?: boolean;
+  onLoad?: () => void;
 }
 
 /**
@@ -16,7 +17,13 @@ export interface TinymistPreviewProps {
  * helper. Presenter and audience surfaces intentionally do not use this
  * component; it is an editor-only preview path.
  */
-export function TinymistPreview({ url, status, error, cropSecondScreen = false }: TinymistPreviewProps) {
+export function TinymistPreview({
+  url,
+  status,
+  error,
+  cropSecondScreen = false,
+  onLoad,
+}: TinymistPreviewProps) {
   const previewUrl = url ? normalizeTinymistPreviewUrl(url) : null;
 
   if (status === "ready" && previewUrl) {
@@ -31,6 +38,7 @@ export function TinymistPreview({ url, status, error, cropSecondScreen = false }
           title="Tinymist rendered slide preview"
           sandbox="allow-scripts allow-same-origin"
           referrerPolicy="no-referrer"
+          onLoad={onLoad}
         />
       </section>
     );

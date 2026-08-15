@@ -1,15 +1,20 @@
-import { autocompletion, completeFromList, type Completion } from "@codemirror/autocomplete";
-import { HighlightStyle, StreamLanguage, syntaxHighlighting, type StreamParser } from "@codemirror/language";
+import { autocompletion, completeFromList } from "@codemirror/autocomplete";
+import { syntaxHighlighting } from "@codemirror/language";
 import { lintGutter, setDiagnostics, type Diagnostic } from "@codemirror/lint";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
-import { tags } from "@lezer/highlight";
 import { basicSetup } from "codemirror";
 import type { LSPClient } from "@codemirror/lsp-client";
 import { useEffect, useRef } from "react";
 import type { TinymistSourceJump } from "../hooks/useTinymistSession";
 import { filePathToUri, uriToFilePath } from "../lib/tinymistTransport";
 import { tinymistSemanticTokens } from "../lib/tinymistSemanticTokens";
+import {
+  typstEditorAccessExtensions,
+  typstFallbackCompletions,
+  typstHighlight,
+  typstLanguage,
+} from "../lib/typstEditorSupport";
 
 export interface TypstEditorProps {
   value: string;
@@ -17,6 +22,8 @@ export interface TypstEditorProps {
   path?: string;
   /** Active Tinymist client. When absent the editor uses its safe fallback. */
   client?: LSPClient | null;
+  /** Dependency sources outside the deck root are view-only. */
+  readOnly?: boolean;
   /** Source range sent by Tinymist's preview or definition navigation. */
   jump?: TinymistSourceJump | null;
   /** Compiler diagnostics used when Tinymist is unavailable. */
@@ -29,99 +36,11 @@ export interface TypstEditorProps {
   onSave: () => void;
 }
 
-interface TypstStreamState {
-  blockComment: boolean;
-  quote: string | null;
-}
-
-const keywords = new Set([
-  "and", "as", "auto", "break", "context", "continue", "else", "false", "for",
-  "if", "import", "in", "let", "none", "not", "or", "return", "set",
-  "show", "true", "while",
-]);
-
-const completions: Completion[] = [
-  ...Array.from(keywords, (label) => ({ label, type: "keyword" })),
-  ...[
-    "align", "block", "box", "circle", "columns", "counter", "figure", "grid", "heading",
-    "image", "link", "list", "page", "place", "read", "rect", "repeat", "rgb", "table",
-    "text",
-  ].map((label) => ({ label, type: "function" })),
-  { label: "#let name = ", type: "snippet", apply: "#let name = " },
-  { label: "#set text()", type: "snippet", apply: "#set text()" },
-  { label: "#show: ", type: "snippet", apply: "#show: " },
-];
-
-const typstParser: StreamParser<TypstStreamState> = {
-  startState: () => ({ blockComment: false, quote: null }),
-  token(stream, state) {
-    if (state.blockComment) {
-      if (stream.skipTo("*/")) {
-        stream.match("*/");
-        state.blockComment = false;
-      } else {
-        stream.skipToEnd();
-      }
-      return "comment";
-    }
-    if (state.quote) {
-      let escaped = false;
-      while (!stream.eol()) {
-        const value = stream.next();
-        if (value === state.quote && !escaped) {
-          state.quote = null;
-          break;
-        }
-        escaped = value === "\\" && !escaped;
-        if (value !== "\\") escaped = false;
-      }
-      return "string";
-    }
-    if (stream.eatSpace()) return null;
-    if (stream.match("//")) {
-      stream.skipToEnd();
-      return "comment";
-    }
-    if (stream.match("/*")) {
-      state.blockComment = true;
-      return "comment";
-    }
-    if (stream.peek() === '"' || stream.peek() === "'") {
-      state.quote = stream.next() ?? null;
-      return "string";
-    }
-    if (stream.sol() && stream.match(/=+\s/)) return "heading";
-    if (stream.sol() && stream.match(/[-+]\s/)) return "list";
-    if (stream.match(/@[\w:-]+/)) return "link";
-    if (stream.match(/<[^>]+>/)) return "labelName";
-    if (stream.match(/\b(?:\d+(?:\.\d+)?)(?:pt|mm|cm|in|em|fr|%|deg)?\b/)) return "number";
-    if (stream.match("#")) return "meta";
-    if (stream.match(/[A-Za-z_][\w-]*/)) {
-      return keywords.has(stream.current()) ? "keyword" : "variableName";
-    }
-    if (stream.match(/[()[\]{}.,:;]/)) return "punctuation";
-    if (stream.match(/[+*/=<>!&|~-]+/)) return "operator";
-    stream.next();
-    return null;
-  },
-};
-
-const typstLanguage = StreamLanguage.define(typstParser);
-const typstHighlight = HighlightStyle.define([
-  { tag: tags.keyword, color: "#d6a5ff" },
-  { tag: [tags.function(tags.variableName), tags.variableName], color: "#d8dee9" },
-  { tag: tags.string, color: "#a8d279" },
-  { tag: tags.number, color: "#f3ba76" },
-  { tag: tags.comment, color: "#68707d", fontStyle: "italic" },
-  { tag: [tags.heading, tags.labelName], color: "#8fd5ff", fontWeight: "650" },
-  { tag: [tags.link, tags.meta], color: "#b8f23c" },
-  { tag: tags.operator, color: "#ff91a4" },
-]);
-
 export function TypstEditor({
   value,
   path,
   client,
+  readOnly = false,
   jump,
   fallbackDiagnostics,
   diagnostics,
@@ -151,10 +70,14 @@ export function TypstEditor({
         basicSetup,
         typstLanguage,
         syntaxHighlighting(typstHighlight),
+        typstEditorAccessExtensions(readOnly),
         ...(hasLanguageServer && client && fileUri
           ? [client.plugin(fileUri, "typst"), tinymistSemanticTokens(client, fileUri)]
-          : [autocompletion({ override: [completeFromList(completions)] }), lintGutter()]),
-        keymap.of([{ key: "Mod-s", preventDefault: true, run: () => { saveRef.current(); return true; } }]),
+          : [autocompletion({ override: [completeFromList(typstFallbackCompletions)] }), lintGutter()]),
+        keymap.of([{ key: "Mod-s", preventDefault: true, run: () => {
+          if (!readOnly) saveRef.current();
+          return true;
+        } }]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) changeRef.current(update.state.doc.toString());
         }),
@@ -187,7 +110,7 @@ export function TypstEditor({
       readyRef.current?.(null);
       view.destroy();
     };
-  }, [client, path]);
+  }, [client, path, readOnly]);
 
   useEffect(() => {
     const view = viewRef.current;

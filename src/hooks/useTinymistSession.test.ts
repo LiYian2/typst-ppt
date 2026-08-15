@@ -62,12 +62,16 @@ describe("Tinymist preview session protocol", () => {
   });
 
   it("maps the selected slide to Tinymist's document-position scroll command", () => {
-    expect(tinymistPageScrollRequest(6)).toEqual({
+    expect(tinymistPageScrollRequest(0)).toEqual({
       command: "tinymist.scrollPreview",
       arguments: [
         "typst-presenter-editor",
-        { event: "panelScrollByPosition", position: { page_no: 6, x: 0, y: 0 } },
+        { event: "panelScrollByPosition", position: { page_no: 1, x: 0, y: 0 } },
       ],
+    });
+    expect(tinymistPageScrollRequest(1).arguments[1]).toEqual({
+      event: "panelScrollByPosition",
+      position: { page_no: 2, x: 0, y: 0 },
     });
   });
 });

@@ -71,6 +71,10 @@ pub fn load_deck(
 
     *state.session.lock().map_err(lock_error)? = Some(Session {
         source_path: source_path.clone(),
+        source_root: source_path
+            .parent()
+            .expect("canonical source paths always have a parent")
+            .to_path_buf(),
         root: root.clone(),
         output_path,
         snapshot: snapshot.clone(),
@@ -157,17 +161,19 @@ pub fn source_document(
     state: State<'_, AppState>,
     path: Option<String>,
 ) -> Result<SourceDocument, String> {
-    let path = {
+    let package_roots = engine::typst_package_roots();
+    let resolved = {
         let session = state.session.lock().map_err(lock_error)?;
         let session = session
             .as_ref()
             .ok_or_else(|| "No deck is open.".to_owned())?;
-        resolve_source_path(session, path.as_deref())?
+        resolve_source_path(session, path.as_deref(), SourceAccess::Read, package_roots)?
     };
-    let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let text = fs::read_to_string(&resolved.path).map_err(|error| error.to_string())?;
     Ok(SourceDocument {
-        path: path.to_string_lossy().into_owned(),
+        path: resolved.path.to_string_lossy().into_owned(),
         text,
+        read_only: resolved.read_only,
     })
 }
 
@@ -182,12 +188,29 @@ pub fn save_source(
         let session = session
             .as_ref()
             .ok_or_else(|| "No deck is open.".to_owned())?;
-        resolve_source_path(session, path.as_deref())?
+        resolve_source_path(session, path.as_deref(), SourceAccess::Write, &[])?.path
     };
     fs::write(path, text).map_err(|error| error.to_string())
 }
 
-fn resolve_source_path(session: &Session, requested: Option<&str>) -> Result<PathBuf, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceAccess {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSource {
+    path: PathBuf,
+    read_only: bool,
+}
+
+fn resolve_source_path(
+    session: &Session,
+    requested: Option<&str>,
+    access: SourceAccess,
+    package_roots: &[PathBuf],
+) -> Result<ResolvedSource, String> {
     let candidate = requested
         .map(PathBuf::from)
         .map(|path| {
@@ -207,17 +230,45 @@ fn resolve_source_path(session: &Session, requested: Option<&str>) -> Result<Pat
     if canonical.extension().and_then(|value| value.to_str()) != Some("typ") {
         return Err("Source jumps may only open .typ files.".to_owned());
     }
-    let root = session
+    let project_root = session
         .root
         .canonicalize()
         .map_err(|error| format!("Unable to resolve deck root: {error}"))?;
-    if !canonical.starts_with(&root) {
-        return Err(format!(
+    let source_root = session
+        .source_root
+        .canonicalize()
+        .map_err(|error| format!("Unable to resolve source root: {error}"))?;
+    if canonical.starts_with(&project_root) {
+        let read_only = !canonical.starts_with(&source_root);
+        if access == SourceAccess::Write && read_only {
+            return Err(format!(
+                "Source path {} is outside the editable deck root.",
+                canonical.display()
+            ));
+        }
+        return Ok(ResolvedSource {
+            path: canonical,
+            read_only,
+        });
+    }
+    {
+        let in_package_root = access == SourceAccess::Read
+            && package_roots.iter().any(|package_root| {
+                package_root
+                    .canonicalize()
+                    .is_ok_and(|package_root| canonical.starts_with(package_root))
+            });
+        if in_package_root {
+            return Ok(ResolvedSource {
+                path: canonical,
+                read_only: true,
+            });
+        }
+        Err(format!(
             "Source path {} is outside the deck root.",
             canonical.display()
-        ));
+        ))
     }
-    Ok(canonical)
 }
 
 #[tauri::command]
@@ -377,6 +428,10 @@ mod tests {
     fn test_session(root: &Path, source_path: &Path) -> Session {
         Session {
             source_path: source_path.to_path_buf(),
+            source_root: source_path
+                .parent()
+                .expect("test source has a parent")
+                .to_path_buf(),
             root: root.to_path_buf(),
             output_path: None,
             snapshot: BuildSnapshot {
@@ -395,34 +450,105 @@ mod tests {
 
     #[test]
     fn source_path_defaults_to_active_deck_and_stays_inside_root() {
-        let root = std::env::temp_dir().join(format!(
+        let project_root = std::env::temp_dir().join(format!(
             "typst-presenter-source-boundary-{}",
             std::process::id()
         ));
-        fs::create_dir_all(&root).unwrap();
-        let source = root.join("main.typ");
-        let include = root.join("chapter.typ");
-        let outside = root
+        let source_root = project_root.join("slides");
+        fs::create_dir_all(&source_root).unwrap();
+        let source = source_root.join("main.typ");
+        let include = source_root.join("chapter.typ");
+        let project_dependency = project_root.join("shared.typ");
+        let outside = project_root
             .parent()
             .expect("temporary root has a parent")
             .join("outside.typ");
+        let package_root = project_root
+            .parent()
+            .expect("temporary root has a parent")
+            .join(format!("typst-presenter-packages-{}", std::process::id()));
+        let package_source = package_root.join("preview/touying/0.7.4/src/utils.typ");
         fs::write(&source, "#import \"chapter.typ\": *").unwrap();
         fs::write(&include, "#let answer = 42").unwrap();
+        fs::write(&project_dependency, "#let shared = true").unwrap();
         fs::write(&outside, "#let answer = 0").unwrap();
-        let session = test_session(&root, &source);
+        fs::create_dir_all(package_source.parent().unwrap()).unwrap();
+        fs::write(&package_source, "#let dependency = true").unwrap();
+        let session = test_session(&project_root, &source);
 
         assert_eq!(
-            resolve_source_path(&session, None).unwrap(),
-            source.canonicalize().unwrap()
+            resolve_source_path(&session, None, SourceAccess::Write, &[]).unwrap(),
+            ResolvedSource {
+                path: source.canonicalize().unwrap(),
+                read_only: false
+            }
         );
         assert_eq!(
-            resolve_source_path(&session, Some("chapter.typ")).unwrap(),
-            include.canonicalize().unwrap()
+            resolve_source_path(
+                &session,
+                Some(project_dependency.to_str().unwrap()),
+                SourceAccess::Read,
+                &[],
+            )
+            .unwrap(),
+            ResolvedSource {
+                path: project_dependency.canonicalize().unwrap(),
+                read_only: true
+            }
         );
-        assert!(resolve_source_path(&session, Some("../outside.typ")).is_err());
-        assert!(resolve_source_path(&session, Some(outside.to_str().unwrap())).is_err());
+        assert!(resolve_source_path(
+            &session,
+            Some(project_dependency.to_str().unwrap()),
+            SourceAccess::Write,
+            &[],
+        )
+        .is_err());
+        assert_eq!(
+            resolve_source_path(
+                &session,
+                Some("slides/chapter.typ"),
+                SourceAccess::Read,
+                &[],
+            )
+            .unwrap(),
+            ResolvedSource {
+                path: include.canonicalize().unwrap(),
+                read_only: false
+            }
+        );
+        assert_eq!(
+            resolve_source_path(
+                &session,
+                Some(package_source.to_str().unwrap()),
+                SourceAccess::Read,
+                std::slice::from_ref(&package_root),
+            )
+            .unwrap(),
+            ResolvedSource {
+                path: package_source.canonicalize().unwrap(),
+                read_only: true
+            }
+        );
+        assert!(resolve_source_path(
+            &session,
+            Some(package_source.to_str().unwrap()),
+            SourceAccess::Write,
+            std::slice::from_ref(&package_root),
+        )
+        .is_err());
+        assert!(
+            resolve_source_path(&session, Some("../outside.typ"), SourceAccess::Read, &[]).is_err()
+        );
+        assert!(resolve_source_path(
+            &session,
+            Some(outside.to_str().unwrap()),
+            SourceAccess::Read,
+            &[],
+        )
+        .is_err());
 
         fs::remove_file(outside).unwrap();
-        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(project_root).unwrap();
+        fs::remove_dir_all(package_root).unwrap();
     }
 }

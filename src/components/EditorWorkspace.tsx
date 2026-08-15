@@ -10,6 +10,7 @@ import {
 } from "../hooks/useTinymistSession";
 import { api } from "../lib/api";
 import { pdfPageCrop } from "../lib/pdfLayout";
+import { replayPreviewPageSync } from "../lib/tinymistPreviewSync";
 import { uriToFilePath } from "../lib/tinymistTransport";
 import { TinymistPreview, type TinymistPreviewStatus } from "./TinymistPreview";
 import { TypstEditor } from "./TypstEditor";
@@ -36,6 +37,7 @@ export function EditorWorkspace({
   const [navigationError, setNavigationError] = useState<string | null>(null);
   const [jump, setJump] = useState<TinymistSourceJump | null>(null);
   const [cropSecondScreen, setCropSecondScreen] = useState(false);
+  const [loadedPreviewUrl, setLoadedPreviewUrl] = useState<string | null>(null);
   const textRef = useRef("");
   const sourceRef = useRef<SourceDocument | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -66,13 +68,15 @@ export function EditorWorkspace({
     return () => {
       cancelled = true;
       const active = sourceRef.current;
-      if (timerRef.current !== null && active) void api.saveSource(textRef.current, active.path);
+      if (timerRef.current !== null && active && !active.readOnly) {
+        void api.saveSource(textRef.current, active.path);
+      }
       pendingViewRef.current?.resolve(null);
     };
   }, [setActiveSource]);
 
   const saveNow = useCallback(async () => {
-    if (!source) return;
+    if (!source || source.readOnly) return;
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
     timerRef.current = null;
     setSaveState("saving");
@@ -92,7 +96,7 @@ export function EditorWorkspace({
     }
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
     timerRef.current = null;
-    if (active) await api.saveSource(textRef.current, active.path);
+    if (active && !active.readOnly) await api.saveSource(textRef.current, active.path);
     const next = await api.sourceDocument(path);
     setActiveSource(next);
     setJump(nextJump ?? null);
@@ -132,12 +136,19 @@ export function EditorWorkspace({
 
   const tinymist = useTinymistSession(build?.sourcePath ?? null, handleSourceJump, handleOpenUri);
 
+  useEffect(() => setLoadedPreviewUrl(null), [tinymist.previewUrl]);
+
   useEffect(() => {
-    if (!tinymist.client || !tinymist.previewUrl) return;
-    void tinymist.client.request("workspace/executeCommand", tinymistPageScrollRequest(currentPage)).catch(() => {
-      // Preview scroll sync is best-effort and never affects the PDF presentation path.
-    });
-  }, [currentPage, tinymist.client, tinymist.previewUrl]);
+    if (!tinymist.client || !tinymist.previewUrl || loadedPreviewUrl !== tinymist.previewUrl) return;
+    const sync = () => {
+      void tinymist.client?.request("workspace/executeCommand", tinymistPageScrollRequest(currentPage)).catch(() => {
+        // Preview scroll sync is best-effort and never affects the PDF presentation path.
+      });
+    };
+    // iframe load precedes Tinymist's asynchronous data-plane WebSocket. Replay
+    // for a bounded window so an already-selected non-first page is not lost.
+    return replayPreviewPageSync(sync, window.setTimeout, window.clearTimeout);
+  }, [currentPage, loadedPreviewUrl, tinymist.client, tinymist.previewUrl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -158,6 +169,7 @@ export function EditorWorkspace({
   }, [currentPage, document]);
 
   const changeText = useCallback((next: string) => {
+    if (sourceRef.current?.readOnly) return;
     textRef.current = next;
     setText(next);
     setSaveState("dirty");
@@ -177,15 +189,22 @@ export function EditorWorkspace({
             {navigationError && <span className="editor-nav-error" role="alert">{navigationError}</span>}
           </span>
           <span className={`save-state save-state--${saveState}`}>
-            {saveState === "saving" && <LoaderCircle className="spin" size={11} />}
-            {saveState === "saved" && <CircleCheck size={11} />}
-            {saveLabel(saveState)}
+            {source.readOnly ? (
+              "Dependency · read-only"
+            ) : (
+              <>
+                {saveState === "saving" && <LoaderCircle className="spin" size={11} />}
+                {saveState === "saved" && <CircleCheck size={11} />}
+                {saveLabel(saveState)}
+              </>
+            )}
           </span>
         </div>
         <TypstEditor
           value={text}
           path={source.path}
           client={tinymist.client}
+          readOnly={source.readOnly}
           jump={jump}
           fallbackDiagnostics={build?.diagnostics ?? []}
           onViewReady={handleViewReady}
@@ -207,6 +226,7 @@ export function EditorWorkspace({
             status={previewStatus(tinymist.status.phase)}
             error={tinymist.error}
             cropSecondScreen={cropSecondScreen}
+            onLoad={() => setLoadedPreviewUrl(tinymist.previewUrl)}
           />
         </article>
         <article className="panel notes-panel editor-notes-panel">

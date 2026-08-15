@@ -26,4 +26,5 @@ export interface PresentationState {
 export interface SourceDocument {
   path: string;
   text: string;
+  readOnly: boolean;
 }
