@@ -4,6 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } fro
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { reportsPinnedTinymistVersion } from "./tinymist-version.mjs";
 
 const TINYMIST_VERSION = "0.15.2";
 const RELEASE_ROOT = `https://github.com/Myriad-Dreamin/tinymist/releases/download/v${TINYMIST_VERSION}`;
@@ -76,7 +77,7 @@ function hostTarget() {
 async function isPinnedTinymist(path) {
   try {
     const output = execFileSync(path, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    return output.includes(`v${TINYMIST_VERSION}`);
+    return reportsPinnedTinymistVersion(output, TINYMIST_VERSION);
   } catch {
     return false;
   }
