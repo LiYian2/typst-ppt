@@ -4,7 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } fro
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { reportsPinnedTinymistVersion } from "./tinymist-version.mjs";
+import { matchesPinnedTinymistMarker, reportsPinnedTinymistVersion } from "./tinymist-version.mjs";
 
 const TINYMIST_VERSION = "0.15.2";
 const RELEASE_ROOT = `https://github.com/Myriad-Dreamin/tinymist/releases/download/v${TINYMIST_VERSION}`;
@@ -45,6 +45,7 @@ if (!artifact) {
 
 const extension = target.includes("windows") ? ".exe" : "";
 const destination = join(projectRoot, "src-tauri", "binaries", `tinymist-${target}${extension}`);
+const markerPath = `${destination}.version.json`;
 if (await isPinnedTinymist(destination)) {
   console.log(`Tinymist v${TINYMIST_VERSION} sidecar is ready for ${target}.`);
   process.exit(0);
@@ -62,6 +63,10 @@ try {
   await mkdir(dirname(destination), { recursive: true });
   await copyFile(binary, destination);
   if (!extension) await chmod(destination, 0o755);
+  await writeFile(markerPath, JSON.stringify({
+    version: TINYMIST_VERSION,
+    sha256: await sha256File(destination),
+  }));
   if (!(await isPinnedTinymist(destination))) {
     const probe = probeTinymistVersion(destination);
     throw new Error(
@@ -80,7 +85,14 @@ function hostTarget() {
 
 async function isPinnedTinymist(path) {
   const probe = probeTinymistVersion(path);
-  return probe.status === 0 && reportsPinnedTinymistVersion(probe.output, TINYMIST_VERSION);
+  if (probe.status !== 0) return false;
+  if (reportsPinnedTinymistVersion(probe.output, TINYMIST_VERSION)) return true;
+  try {
+    const marker = JSON.parse(await readFile(markerPath, "utf8"));
+    return matchesPinnedTinymistMarker(marker, TINYMIST_VERSION, await sha256File(path));
+  } catch {
+    return false;
+  }
 }
 
 function probeTinymistVersion(path) {
@@ -104,10 +116,14 @@ async function copyFileFromResponse(response, destinationPath) {
 }
 
 async function verifySha256(path, expected) {
-  const digest = createHash("sha256").update(await readFile(path)).digest("hex");
+  const digest = await sha256File(path);
   if (digest !== expected) {
     throw new Error(`Checksum mismatch for ${basename(path)}: expected ${expected}, received ${digest}.`);
   }
+}
+
+async function sha256File(path) {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
 }
 
 async function findExtractedBinary(root, extension) {
