@@ -39,7 +39,7 @@ jobs:
       - name: Prepare pinned Tinymist sidecar
         if: steps.tinymist-cache.outputs.cache-hit != 'true'
         run: node scripts/prepare-tinymist.mjs
-      - uses: tauri-apps/tauri-action@v0.6.2
+      - uses: tauri-apps/tauri-action@v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
