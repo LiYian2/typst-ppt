@@ -411,11 +411,6 @@ pub fn send_tinymist_message(
     generation: u64,
     message: String,
 ) -> Result<(), String> {
-    let value: Value = serde_json::from_str(&message)
-        .map_err(|error| format!("Tinymist message must be valid JSON: {error}"))?;
-    if !value.is_object() {
-        return Err("Tinymist message must be a JSON object.".to_owned());
-    }
     let stdin = {
         let process = state.tinymist.lock().map_err(lock_error)?;
         let process = process
@@ -429,6 +424,11 @@ pub fn send_tinymist_message(
         }
         Arc::clone(&process.stdin)
     };
+    let value: Value = serde_json::from_str(&message)
+        .map_err(|error| format!("Tinymist message must be valid JSON: {error}"))?;
+    if !value.is_object() {
+        return Err("Tinymist message must be a JSON object.".to_owned());
+    }
     let mut stdin = stdin.lock().map_err(lock_error)?;
     write_lsp_message(&mut *stdin, &message).map_err(|error| error.to_string())
 }
