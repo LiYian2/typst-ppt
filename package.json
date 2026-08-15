@@ -21,6 +21,7 @@
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/language": "^6.12.4",
     "@codemirror/lint": "^6.9.7",
+    "@codemirror/lsp-client": "^6.2.5",
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.8",
     "@lezer/highlight": "^1.2.3",
@@ -30,7 +31,8 @@
     "lucide-react": "^0.468.0",
     "pdfjs-dist": "^6.2.108",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "vscode-languageserver-protocol": "^3.17.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
