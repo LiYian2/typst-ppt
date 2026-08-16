@@ -277,7 +277,8 @@ pub fn audience_open(app: AppHandle) -> bool {
 }
 
 #[tauri::command]
-pub fn open_audience(app: AppHandle) -> Result<(), String> {
+// WebView2 can deadlock when a window is built from a synchronous command on Windows.
+pub async fn open_audience(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("audience") {
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
